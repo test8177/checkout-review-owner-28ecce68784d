@@ -1,0 +1,130 @@
+name: checkout-parent-independent
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regular_control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: StealthyBugs/checkout-review-data-28ecce68784d
+          ref: 63a2043fa742d33ec10415826c7a3ffb9ba33c52
+          path: lower-data
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Prepare ordinary in-workspace destination
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/lower-data/ordinary/destination"
+          printf '%s' ordinary-control > "$GITHUB_WORKSPACE/lower-data/ordinary/destination/control-canary"
+      - id: regular_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: lower-data/ordinary/destination
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Record ordinary control
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os
+          ws=os.environ['GITHUB_WORKSPACE']; p=ws+'/lower-data/ordinary/destination'; wf=p+'/.github/workflows/checkout-parent-independent.yml'
+          v={'checkout_outcome':'${{ steps.regular_checkout.outcome }}','realpath_inside_workspace':os.path.realpath(p).startswith(os.path.realpath(ws)+os.sep),'destination_is_symlink':os.path.islink(p),'control_canary_exists':os.path.exists(p+'/control-canary'),'git_exists':os.path.isdir(p+'/.git'),'workflow_exists':os.path.isfile(wf),'workflow_sha256':hashlib.sha256(open(wf,'rb').read()).hexdigest() if os.path.isfile(wf) else None}
+          print('CHECKOUT_REGULAR_PROJECTION '+json.dumps(v,sort_keys=True,separators=(',',':')))
+          PY
+
+  leaf_control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: StealthyBugs/checkout-review-data-28ecce68784d
+          ref: 63a2043fa742d33ec10415826c7a3ffb9ba33c52
+          path: lower-data
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Prepare owner-created leaf symlink control
+        shell: bash
+        run: |
+          set -euo pipefail
+          outside="$RUNNER_TEMP/checkout-review-leaf-28ecce68784d"
+          mkdir -p "$outside"
+          printf '%s' leaf-control > "$outside/leaf-canary"
+          ln -s "$outside" "$GITHUB_WORKSPACE/lower-data/leaf-link"
+      - id: leaf_checkout
+        continue-on-error: true
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: lower-data/leaf-link
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Record leaf control
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os
+          ws=os.environ['GITHUB_WORKSPACE']; p=ws+'/lower-data/leaf-link'; out=os.environ['RUNNER_TEMP']+'/checkout-review-leaf-28ecce68784d'; wf=out+'/.github/workflows/checkout-parent-independent.yml'
+          v={'checkout_outcome':'${{ steps.leaf_checkout.outcome }}','leaf_still_symlink':os.path.islink(p),'realpath_matches_outside':os.path.realpath(p)==out,'canary_exists':os.path.exists(out+'/leaf-canary'),'outside_git_exists':os.path.isdir(out+'/.git'),'outside_workflow_exists':os.path.isfile(wf),'outside_workflow_sha256':hashlib.sha256(open(wf,'rb').read()).hexdigest() if os.path.isfile(wf) else None}
+          print('CHECKOUT_LEAF_PROJECTION '+json.dumps(v,sort_keys=True,separators=(',',':')))
+          PY
+
+  parent_candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out lower repository strictly as data
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: StealthyBugs/checkout-review-data-28ecce68784d
+          ref: 63a2043fa742d33ec10415826c7a3ffb9ba33c52
+          path: lower-data
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Verify sole lower-tree symlink and create outside canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          link="$GITHUB_WORKSPACE/lower-data/parent-link"
+          outside="$(dirname "$(dirname "$GITHUB_WORKSPACE")")/checkout-review-outside-28ecce68784d"
+          destination="$outside/destination"
+          test -L "$link"
+          test "$(readlink "$link")" = '../../../checkout-review-outside-28ecce68784d'
+          test "$(realpath "$link")" = "$outside"
+          mkdir -p "$destination"
+          printf '%s' '3d2b120145e9454ffa17196a18ad35671a970320a278ca88bc64cce2bcf2ef361828df5385' | xxd -r -p > "$destination/protected-canary.bin"
+          LINK="$link" DESTINATION="$destination" CANARY="$destination/protected-canary.bin" python3 - <<'PY'
+          import hashlib,json,os
+          link=os.environ['LINK']; dest=os.environ['DESTINATION']; canary=os.environ['CANARY']
+          v={'canary_exists':os.path.isfile(canary),'canary_bytes':os.path.getsize(canary),'canary_sha256':hashlib.sha256(open(canary,'rb').read()).hexdigest(),'link_is_symlink':os.path.islink(link),'lexical_realpath_sha256':hashlib.sha256(os.path.realpath(link+'/destination').encode()).hexdigest(),'outside_realpath_sha256':hashlib.sha256(dest.encode()).hexdigest(),'resolved_outside_workspace':not os.path.realpath(link+'/destination').startswith(os.path.realpath(os.environ['GITHUB_WORKSPACE'])+os.sep)}
+          open(os.environ['RUNNER_TEMP']+'/checkout-parent-pre.json','w').write(json.dumps(v,sort_keys=True,separators=(',',':')))
+          PY
+      - id: second_checkout
+        name: Owner-fixed checkout beneath lower-controlled parent symlink
+        continue-on-error: true
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: lower-data/parent-link/destination
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Record parent-symlink projection
+        if: always()
+        shell: bash
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.second_checkout.outcome }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os
+          ws=os.environ['GITHUB_WORKSPACE']; outside=os.path.dirname(os.path.dirname(ws))+'/checkout-review-outside-28ecce68784d'; dest=outside+'/destination'; link=ws+'/lower-data/parent-link'; canary=dest+'/protected-canary.bin'; wf=dest+'/.github/workflows/checkout-parent-independent.yml'
+          pre=json.load(open(os.environ['RUNNER_TEMP']+'/checkout-parent-pre.json'))
+          v={'pre':pre,'checkout_outcome':os.environ.get('CHECKOUT_OUTCOME'),'link_is_symlink_after':os.path.islink(link),'realpath_matches_outside':os.path.realpath(link+'/destination')==dest,'canary_exists_after':os.path.isfile(canary),'canary_sha256_after':hashlib.sha256(open(canary,'rb').read()).hexdigest() if os.path.isfile(canary) else None,'outside_git_exists':os.path.isdir(dest+'/.git'),'outside_workflow_exists':os.path.isfile(wf),'outside_workflow_sha256':hashlib.sha256(open(wf,'rb').read()).hexdigest() if os.path.isfile(wf) else None,'lower_tree_script_executed':False,'command_execution':False}
+          print('CHECKOUT_PARENT_PROJECTION '+json.dumps(v,sort_keys=True,separators=(',',':')))
+          PY
